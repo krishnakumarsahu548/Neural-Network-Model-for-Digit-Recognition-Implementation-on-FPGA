@@ -1,0 +1,41 @@
+import numpy as np
+from tensorflow.keras.datasets import mnist
+
+import os
+print("Current working directory:", os.getcwd())
+
+
+
+# Load MNIST test data
+(_, _), (x_test, y_test) = mnist.load_data()
+
+# Normalize to [0,1]
+x_test = x_test.astype(np.float32) / 255.0
+
+def float_to_q8_8(x):
+    """Convert float (0-1) to Q8.8 signed 16-bit 2's complement"""
+    val = int(round(x * 256))  # scale
+    if val < 0:   # wrap negative
+        val = (1 << 16) + val
+    return val & 0xFFFF
+
+# Generate 100 images (10 per digit)
+counts = {d: 0 for d in range(10)}
+max_per_digit = 10
+total = 0
+
+for idx in range(len(x_test)):
+    digit = y_test[idx]
+    if counts[digit] < max_per_digit:
+        img = x_test[idx]
+        memfile = f"mnist_{digit}_{counts[digit]}_q8_8.mem"
+        with open(memfile, "w") as f:
+            for row in img:
+                for px in row:
+                    f.write(f"{float_to_q8_8(px):04X}\n")
+        counts[digit] += 1
+        total += 1
+    if total >= 100:
+        break
+
+print("Generated 100 .mem files (10 per digit).")
