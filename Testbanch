@@ -1,0 +1,477 @@
+//code for test_regnet.sv 
+`timescale 1ns / 1ps
+`include "C:\Users\pc\Desktop\xilinx krishna\1 Vivado\neural_network8\neural_network8.srcs\sources_1\new\include.svh"
+
+module test_regnet;
+
+    localparam int INPUT_SIZE   = 784;
+    localparam int NUM_LAYERS   = 4;
+    localparam int TOTAL_IMAGES = 100; // 10 digits × 10 samples
+
+    localparam layer_builder TB_LAYERS[NUM_LAYERS] = '{
+        '{INPUT, 784, activation_type'(NONE)},
+        '{DENSE, 16, activation_type'(RELU)},
+        '{DENSE, 16, activation_type'(RELU)},
+        '{DENSE, 10, activation_type'(SOFTMAX)}
+    };
+
+    // --- Signals ---
+    logic clk, reset;
+    logic image_ready;
+    fixed_point pixels[INPUT_SIZE];
+
+    // --- DUT Outputs ---
+    logic [$clog2(TB_LAYERS[NUM_LAYERS-1].SIZE)-1:0] label;
+    logic label_ready;
+
+    // --- Memories for Weights & Biases ---
+    fixed_point weights1[16][784];
+    fixed_point bias1[16];
+    fixed_point weights2[16][16];
+    fixed_point bias2[16];
+    fixed_point weights3[10][16];
+    fixed_point bias3[10];
+
+    initial begin
+        $readmemh("W1_vertical.mem", weights1);
+        $readmemh("b1_vertical.mem", bias1);
+        $readmemh("W2_vertical.mem", weights2);
+        $readmemh("b2_vertical.mem", bias2);
+        $readmemh("W3_vertical.mem", weights3);
+        $readmemh("b3_vertical.mem", bias3);
+    end
+
+    // --- DUT Instance ---
+    regnet #(
+        .INPUT_SIZE(INPUT_SIZE),
+        .NUM_LAYERS(NUM_LAYERS),
+        .LAYERS(TB_LAYERS)
+    ) uut (
+        .clk(clk),
+        .reset(reset),
+        .image_ready(image_ready),
+        .pixels(pixels),
+        .weights1(weights1), .bias1(bias1),
+        .weights2(weights2), .bias2(bias2),
+        .weights3(weights3), .bias3(bias3),
+        .label(label),
+        .label_ready(label_ready)
+    );
+
+    // Clock
+    initial begin
+        clk = 0;
+        forever #5 clk = ~clk;
+    end
+
+    // --- Waveform monitoring signals ---
+    int img_count;               // current image number (1..100)
+    int expected_label;          // expected digit
+    int running_accuracy_x100;   // accuracy *100 (9876 = 98.76%)
+
+    // --- Test sequence ---
+    initial begin
+        // Declarations
+        reg  [15:0] mnist_data [0:INPUT_SIZE-1];
+        int  img_index [TOTAL_IMAGES]; // encoded digit*100 + sample
+        int  exp_list  [TOTAL_IMAGES]; // expected digit
+        int  total, correct;
+        string img_file;
+
+        // predeclare loop vars
+        int idx, d, i, j, k;
+        int digit, sample;
+        int tmp_idx, tmp_exp;
+
+        // Init
+        total = 0; correct = 0; running_accuracy_x100 = 0;
+        img_count = 0; expected_label = 0;
+
+        reset = 1; image_ready = 0;
+        #20 reset = 0;
+
+        // --- Build index list (0_0 to 9_9) ---
+        idx = 0;
+        for (d = 0; d < 10; d++) begin
+            for (i = 0; i < 10; i++) begin
+                img_index[idx] = (d*100) + i; // encode digit & sample
+                exp_list[idx]  = d;
+                idx++;
+            end
+        end
+
+        // --- Shuffle the list (Fisher-Yates) ---
+        for (i = TOTAL_IMAGES-1; i > 0; i--) begin
+            j = $urandom_range(0, i);
+
+            tmp_idx      = img_index[i];
+            tmp_exp      = exp_list[i];
+            img_index[i] = img_index[j];
+            exp_list[i]  = exp_list[j];
+            img_index[j] = tmp_idx;
+            exp_list[j]  = tmp_exp;
+        end
+
+        // --- Run randomized tests ---
+        for (k = 0; k < TOTAL_IMAGES; k++) begin
+            digit  = img_index[k] / 100;
+            sample = img_index[k] % 100;
+
+            img_file = $sformatf("mnist_%0d_%0d_q8_8.mem", digit, sample);
+            $readmemh(img_file, mnist_data);
+
+            for (j = 0; j < INPUT_SIZE; j++)
+                pixels[j] = fixed_point'(mnist_data[j]);
+
+            @(posedge clk);
+            image_ready = 1;
+            @(posedge clk);
+            image_ready = 0;
+
+            wait (label_ready);
+
+            total++;
+            img_count      = total;         // waveform signal
+            expected_label = exp_list[k];   // waveform signal
+
+            if (label == exp_list[k]) begin
+                correct++;
+                $display("Image: %s | Expected=%0d | Predicted=%0d | Result=OK",
+                          img_file, exp_list[k], label);
+            end else begin
+                $display("Image: %s | Expected=%0d | Predicted=%0d | Result=ERR",
+                          img_file, exp_list[k], label);
+            end
+
+            running_accuracy_x100 = (correct * 10000) / total; // ×100
+
+            $display(" -> Running Accuracy: %0d/%0d = %0.2f %%\n",
+                      correct, total, running_accuracy_x100/100.0);
+
+            #20;
+        end
+
+        // --- Final accuracy ---
+        $display("=====================================");
+        $display(" Total Images: %0d", total);
+        $display(" Correct     : %0d", correct);
+        $display(" Wrong       : %0d", total-correct);
+        $display(" Accuracy    : %0.2f %%",
+                  running_accuracy_x100/100.0);
+        $display("=====================================");
+
+   //     $finish;
+    end
+endmodule
+
+
+`timescale 1ns / 1ps
+//`include "C:\Users\pc\Desktop\xilinx krishna\1 Vivado\neural_network9\neural_network9.srcs\sources_1\new\include.svh"
+
+module clock_generator #(parameter
+    real CLOCK_PERIOD = 10,
+    real RESET_PERIOD = 10
+) (
+    output logic clock, reset
+);
+
+    localparam CLOCK_WIDTH = CLOCK_PERIOD / 2;
+    localparam RESET_WIDTH = RESET_PERIOD / 2;
+
+    initial begin
+        clock = 0;
+
+        reset = 0;
+        #RESET_WIDTH
+        reset = 1;
+        #RESET_WIDTH
+        reset = 0;
+
+        forever begin
+            clock = ~clock;
+            #CLOCK_WIDTH;
+        end
+    end
+
+endmodule
+
+
+module test_neuron;
+
+    // Device under test
+
+    localparam int NUM_INPUTS = 16;
+    localparam activation_type ACTIVATION = RELU;
+
+    logic clock, reset, inputs_ready, output_ready;
+    fixed_point inputs[NUM_INPUTS], out;
+
+    neuron #(
+        .NUM_INPUTS(NUM_INPUTS),
+        .ACTIVATION(ACTIVATION)
+    ) n (.*);
+
+
+    // Clock generator
+
+    localparam real CLOCK_PERIOD = 1.0;
+    localparam real RESET_PERIOD = 0.1;
+
+    clock_generator #(
+        .CLOCK_PERIOD(CLOCK_PERIOD),
+        .RESET_PERIOD(RESET_PERIOD)
+    ) cg (.*);
+
+
+    // Stimulus
+
+    initial begin
+        #RESET_PERIOD
+
+        $display("Inputs:");
+        foreach (inputs[i]) begin
+            inputs[i].integral = 0;
+            inputs[i].fraction = $urandom_range(1 << FRACTION_WIDTH);
+            $display("%b.%b", inputs[i].integral, inputs[i].fraction);
+        end
+        inputs_ready = 1;
+
+        forever begin
+            #CLOCK_PERIOD
+            if (output_ready) begin
+                $display("Output:");
+                $display("%b.%b", out.integral, out.fraction);
+                $stop;
+            end
+        end
+        $stop;
+    end
+
+endmodule
+module test_neural_network;
+    
+    // Device under test
+    localparam int NUM_LAYERS = 4;
+    localparam layer_builder LAYERS[NUM_LAYERS] = '{
+        '{INPUT, 784, NONE},
+        '{DENSE, 16, RELU},
+        '{DENSE, 16, RELU},
+        '{DENSE, 10, SOFTMAX}
+    };
+    
+    logic clock, reset, inputs_ready, outputs_ready;
+    fixed_point inputs[LAYERS[0].SIZE], outputs[LAYERS[NUM_LAYERS-1].SIZE];
+    
+    neural_network #(
+        .NUM_LAYERS(NUM_LAYERS),
+        .LAYERS(LAYERS)
+    ) nn (.*);
+
+    // Clock generator
+    localparam real CLOCK_PERIOD = 1.0;
+    localparam real RESET_PERIOD = 0.1;
+
+    clock_generator #(
+        .CLOCK_PERIOD(CLOCK_PERIOD),
+        .RESET_PERIOD(RESET_PERIOD)
+    ) cg (.*);
+
+    // Stimulus
+    initial begin
+        reg [15:0] q88_values[0:LAYERS[0].SIZE-1];
+        integer i;
+        integer predicted_class;
+        real max_val;
+        real current_val;
+
+        // Hold reset at start
+        inputs_ready = 0;
+        #RESET_PERIOD;
+
+        // Load input image (Q8.8 format)
+        $readmemh("mnist_5_input_q8_8.mem", q88_values);
+
+        // Initialize inputs from Q8.8 file
+        for (i = 0; i < LAYERS[0].SIZE; i++) begin
+            inputs[i].integral = q88_values[i][15:8];
+            inputs[i].fraction = q88_values[i][7:0];
+        end
+
+        // Debug: print first 10 inputs
+        $display("First 10 input values (Q8.8):");
+        for (i = 0; i < 10; i++) begin
+            $display("Input[%0d] = %0d.%0d (hex: %h)", 
+                     i, inputs[i].integral, inputs[i].fraction, q88_values[i]);
+        end
+
+        // Pulse inputs_ready for 1 clock
+        @(posedge clock);
+        inputs_ready = 1;
+        @(posedge clock);
+        inputs_ready = 0;
+
+        // Wait for outputs_ready from DUT
+        wait (outputs_ready);
+
+        // Read and find predicted class
+        max_val = -1e9;
+        predicted_class = -1;
+        
+        $display("\nNetwork Outputs:");
+        for (i = 0; i < LAYERS[NUM_LAYERS-1].SIZE; i++) begin
+            // Signed Q8.8 ? real conversion
+            current_val = $itor({{8{outputs[i].integral[7]}}, 
+                                 outputs[i].integral, 
+                                 outputs[i].fraction}) / 256.0;
+
+            $display("Neuron %0d: %0d.%0d (%.6f)", 
+                     i, outputs[i].integral, outputs[i].fraction, current_val);
+
+            if (current_val > max_val) begin
+                max_val = current_val;
+                predicted_class = i;
+            end
+        end
+
+        // Sanity check
+        if (max_val == 0) begin
+            $error("All outputs are zero! Check weights/biases load.");
+        end
+
+        $display("\nPredicted digit: %0d (confidence: %.2f%%)", 
+                 predicted_class, max_val*100);
+
+        $stop;
+    end
+endmodule
+
+
+
+module test_dense_layer;
+
+    // --- Parameters ---
+    localparam int NUM_INPUTS = 784;
+    localparam int LAYER1_NEURONS = 16;
+    localparam int LAYER2_NEURONS = 16;
+    localparam int LAYER3_NEURONS = 10;
+    localparam activation_type ACTIVATION = RELU;
+
+    // --- Signals ---
+    logic clock, reset, inputs_ready;
+    fixed_point inputs[NUM_INPUTS];
+    
+    // Layer 1 signals
+    fixed_point W1[LAYER1_NEURONS][NUM_INPUTS];
+    fixed_point B1[LAYER1_NEURONS];
+    fixed_point layer1_outputs[LAYER1_NEURONS];
+    logic layer1_ready;
+    
+    // Layer 2 signals
+    fixed_point W2[LAYER2_NEURONS][LAYER1_NEURONS];
+    fixed_point B2[LAYER2_NEURONS];
+    fixed_point layer2_outputs[LAYER2_NEURONS];
+    logic layer2_ready;
+    
+    // Layer 3 signals
+    fixed_point W3[LAYER3_NEURONS][LAYER2_NEURONS];
+    fixed_point B3[LAYER3_NEURONS];
+    fixed_point pre_softmax[LAYER3_NEURONS];
+    logic layer3_ready;
+
+    // --- DUT Instantiations ---
+    dense_layer #(
+        .NUM_INPUTS(NUM_INPUTS),
+        .NUM_NEURONS(LAYER1_NEURONS),
+        .ACTIVATION(RELU)
+    ) layer_1 (
+        .clock(clock),
+        .reset(reset),
+        .inputs_ready(inputs_ready),
+        .inputs(inputs),
+        .weights(W1),
+        .biases(B1),
+        .outputs(layer1_outputs),
+        .outputs_ready(layer1_ready)
+    );
+
+    dense_layer #(
+        .NUM_INPUTS(LAYER1_NEURONS),
+        .NUM_NEURONS(LAYER2_NEURONS),
+        .ACTIVATION(RELU)
+    ) layer_2 (
+        .clock(clock),
+        .reset(reset),
+        .inputs_ready(layer1_ready),
+        .inputs(layer1_outputs),
+        .weights(W2),
+        .biases(B2),
+        .outputs(layer2_outputs),
+        .outputs_ready(layer2_ready)
+    );
+
+    dense_layer #(
+        .NUM_INPUTS(LAYER2_NEURONS),
+        .NUM_NEURONS(LAYER3_NEURONS),
+        .ACTIVATION(NONE)
+    ) layer_3 (
+        .clock(clock),
+        .reset(reset),
+        .inputs_ready(layer2_ready),
+        .inputs(layer2_outputs),
+        .weights(W3),
+        .biases(B3),
+        .outputs(pre_softmax),
+        .outputs_ready(layer3_ready)
+    );
+
+    // --- Clock Generator ---
+    // It's best practice to have the clock generator in its own block.
+    initial begin
+        clock = 0;
+        forever #5 clock = ~clock; // 100MHz clock (10ns period)
+    end
+
+    // --- Test Stimulus and Sequence ---
+    initial begin
+        // 1. Load weights and biases from memory files at time 0
+        $readmemh("W1_vertical.mem", W1);
+        $readmemh("b1_vertical.mem", B1);
+        $readmemh("W2_vertical.mem", W2);
+        $readmemh("b2_vertical.mem", B2);
+        $readmemh("W3_vertical.mem", W3);
+        $readmemh("b3_vertical.mem", B3);
+        
+        // 2. Initialize and apply reset
+        reset = 1;
+        inputs_ready = 0;
+        #20; // Wait for a couple of clock cycles
+        reset = 0;
+        #1;  // Allow reset to propagate before continuing
+        
+        // 3. Load input data and apply to the network
+        $readmemh("mnist_1_vertical_q88_inverted.mem", inputs);
+        #10;
+        inputs_ready = 1;
+        
+        // 4. Wait for the final output to be ready
+        wait(layer3_ready);
+        #10; // Wait a few extra cycles for signals to settle before displaying
+        
+        // 5. Display results
+        $display("---------------------------------");
+        $display("Network outputs at time %0t:", $time);
+        for (int i = 0; i < LAYER3_NEURONS; i++) begin
+            // Assuming fixed_point is a struct {s, i, f}
+            // If not, you may need to adjust the display format.
+            $display("Output %0d: %h", i, pre_softmax[i]);
+        end
+        $display("---------------------------------");
+        
+        // 6. Write outputs to a file
+        $writememh("network_outputs.mem", pre_softmax);
+        
+        // 7. End the simulation
+   //     $finish;
+    end
+
+endmodule
