@@ -1,0 +1,173 @@
+
+`timescale 1ns / 1ps
+`ifndef INCLUDE_SVH
+`define INCLUDE_SVH
+
+parameter INTEGRAL_WIDTH = 8;
+parameter FRACTION_WIDTH = 8;
+// Q8.8 fixed-point (signed 16-bit)
+parameter INPUT_SIZE = 784; // for MNIST
+parameter L1_SIZE = 16;
+parameter L2_SIZE = 16;
+parameter L3_SIZE = 10;
+
+reg signed [15:0] W1 [0:(L1_SIZE*INPUT_SIZE)-1];
+reg signed [15:0] B1 [0:L1_SIZE-1];
+reg signed [15:0] W2 [0:(L2_SIZE*L1_SIZE)-1];
+reg signed [15:0] B2 [0:L2_SIZE-1];
+reg signed [15:0] W3 [0:(L3_SIZE*L2_SIZE)-1];
+reg signed [15:0] B3 [0:L3_SIZE-1];
+
+typedef struct packed {
+    logic signed [INTEGRAL_WIDTH-1:0] integral;
+    logic [FRACTION_WIDTH-1:0] fraction;
+} fixed_point; // signed fixed_point type
+
+typedef enum logic [1:0] {RELU, SOFTMAX, NONE} activation_type;
+
+typedef enum logic [1:0] {INPUT, CONVOLUTIONAL, POOLING, DENSE} layer_type;
+
+typedef struct {
+    layer_type TYPE;
+    int SIZE;
+    activation_type ACTIVATION;
+} layer_builder;
+
+`endif
+
+
+`timescale 1ns / 1ps
+`include "C:\Users\pc\Desktop\xilinx krishna\1 Vivado\neural_network8\neural_network8.srcs\sources_1\new\include.svh"
+
+
+module neural_network #(parameter
+    int NUM_LAYERS = 4,
+    layer_builder LAYERS[NUM_LAYERS] = '{
+        '{INPUT, 784, NONE},
+        '{DENSE, 16, RELU},  
+        '{DENSE, 16, RELU},
+        '{DENSE, 10, SOFTMAX}  
+    }
+) (
+    input  logic clock, reset, inputs_ready,
+    input  fixed_point inputs[LAYERS[0].SIZE],
+
+    // Model parameters for all layers
+    input  fixed_point W1[LAYERS[1].SIZE][LAYERS[0].SIZE],
+    input  fixed_point B1[LAYERS[1].SIZE],
+    input  fixed_point W2[LAYERS[2].SIZE][LAYERS[1].SIZE],
+    input  fixed_point B2[LAYERS[2].SIZE],
+    input  fixed_point W3[LAYERS[3].SIZE][LAYERS[2].SIZE],
+    input  fixed_point B3[LAYERS[3].SIZE],
+
+    output fixed_point outputs[LAYERS[NUM_LAYERS-1].SIZE],
+    output logic outputs_ready
+);
+
+    // ================= Layer 1 =================
+    fixed_point layer_1_outputs[LAYERS[1].SIZE];
+    logic layer_1_ready;
+
+    dense_layer #(
+        .NUM_INPUTS(LAYERS[0].SIZE),
+        .NUM_NEURONS(LAYERS[1].SIZE),
+        .ACTIVATION(LAYERS[1].ACTIVATION)
+    ) layer_1 (
+        .clock(clock),
+        .reset(reset),
+        .inputs_ready(inputs_ready),
+        .inputs(inputs),
+        .weights(W1),
+        .biases(B1),
+        .outputs(layer_1_outputs),
+        .outputs_ready(layer_1_ready)
+    );
+
+    // ================= Layer 2 =================
+    fixed_point layer_2_outputs[LAYERS[2].SIZE];
+    logic layer_2_ready;
+
+    dense_layer #(
+        .NUM_INPUTS(LAYERS[1].SIZE),
+        .NUM_NEURONS(LAYERS[2].SIZE),
+        .ACTIVATION(LAYERS[2].ACTIVATION)
+    ) layer_2 (
+        .clock(clock),
+        .reset(reset),
+        .inputs_ready(layer_1_ready),
+        .inputs(layer_1_outputs),
+        .weights(W2),
+        .biases(B2),
+        .outputs(layer_2_outputs),
+        .outputs_ready(layer_2_ready)
+    );
+
+    // ================= Layer 3 =================
+    fixed_point layer_3_outputs[LAYERS[3].SIZE];
+    logic layer_3_ready;
+
+    dense_layer #(
+        .NUM_INPUTS(LAYERS[2].SIZE),
+        .NUM_NEURONS(LAYERS[3].SIZE),
+        .ACTIVATION(LAYERS[3].ACTIVATION)
+    ) layer_3 (
+        .clock(clock),
+        .reset(reset),
+        .inputs_ready(layer_2_ready),
+        .inputs(layer_2_outputs),
+        .weights(W3),
+        .biases(B3),
+        .outputs(layer_3_outputs),
+        .outputs_ready(layer_3_ready)
+    );
+
+    // ================= Outputs =================
+    assign outputs       = layer_3_outputs;
+    assign outputs_ready = layer_3_ready;
+
+    // ================= FSM =================
+    localparam STATE_WIDTH = $clog2(1 + NUM_LAYERS + 1);
+
+    enum logic [STATE_WIDTH-1:0] {
+        idle,
+        layer_1_processing,
+        layer_2_processing,
+        layer_3_processing,
+        done
+    } present_state, next_state;
+
+    always_ff @(posedge clock, posedge reset) begin
+        if (reset)
+            present_state <= idle;
+        else
+            present_state <= next_state;
+    end
+
+    always_comb begin
+        next_state = present_state;
+        unique case (present_state)
+            idle:
+                if (inputs_ready)
+                    next_state = layer_1_processing;
+
+            layer_1_processing:
+                if (layer_1_ready)
+                    next_state = layer_2_processing;
+
+            layer_2_processing:
+                if (layer_2_ready)
+                    next_state = layer_3_processing;
+
+            layer_3_processing:
+                if (layer_3_ready)
+                    next_state = done;
+
+            done:
+                next_state = idle;
+
+            default:
+                next_state = idle;
+        endcase
+    end
+endmodule
+
