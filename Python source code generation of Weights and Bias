@@ -1,0 +1,98 @@
+import torch
+import torch.nn as nn
+import torchvision
+import torchvision.transforms as transforms
+import numpy as np
+
+# ------------------------------
+# Parameters
+# ------------------------------
+INPUT_SIZE = 784
+H1_SIZE = 16
+H2_SIZE = 16
+OUT_SIZE = 10
+EPOCHS = 3          # Small for testing
+BATCH_SIZE = 64
+LEARNING_RATE = 0.01
+
+INT_BITS = 8
+FRAC_BITS = 8
+SCALE = 2 ** FRAC_BITS
+
+# ------------------------------
+# 1. Load MNIST
+# ------------------------------
+transform = transforms.Compose([transforms.ToTensor()])
+train_dataset = torchvision.datasets.MNIST(root='./data', train=True, transform=transform, download=True)
+train_loader = torch.utils.data.DataLoader(dataset=train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+
+# ------------------------------
+# 2. Define the Model
+# ------------------------------
+class DNN(nn.Module):
+    def __init__(self):
+        super(DNN, self).__init__()
+        self.fc1 = nn.Linear(INPUT_SIZE, H1_SIZE)
+        self.fc2 = nn.Linear(H1_SIZE, H2_SIZE)
+        self.fc3 = nn.Linear(H2_SIZE, OUT_SIZE)
+
+    def forward(self, x):
+        x = x.view(-1, INPUT_SIZE)
+        x = torch.relu(self.fc1(x))
+        x = torch.relu(self.fc2(x))
+        x = self.fc3(x)
+        return x
+
+model = DNN()
+
+# ------------------------------
+# 3. Train the Model
+# ------------------------------
+criterion = nn.CrossEntropyLoss()
+optimizer = torch.optim.SGD(model.parameters(), lr=LEARNING_RATE)
+
+print("Training...")
+for epoch in range(EPOCHS):
+    for images, labels in train_loader:
+        outputs = model(images)
+        loss = criterion(outputs, labels)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+    print(f"Epoch [{epoch+1}/{EPOCHS}], Loss: {loss.item():.4f}")
+
+# ------------------------------
+# 4. Function to Convert to Q8.8
+# ------------------------------
+def to_q8_8_signed(value):
+    scaled = int(np.round(value * SCALE))  # Scale
+    if scaled < 0:
+        scaled = (1 << (INT_BITS + FRAC_BITS)) + scaled  # Two's complement
+    return scaled & 0xFFFF  # 16-bit mask
+
+def save_mem_vertical(filename, tensor):
+    flat = tensor.flatten().detach().numpy()
+    with open(filename, "w") as f:
+        for val in flat:
+            f.write(f"{to_q8_8_signed(val):04X}\n")  # Uppercase HEX, 4 digits
+
+# ------------------------------
+# 5. Save Weights and Biases
+# ------------------------------
+print("Saving weights and biases in vertical Q8.8 2's complement format...")
+
+# Layer 1
+save_mem_vertical("W1_vertical.mem", model.fc1.weight)
+save_mem_vertical("b1_vertical.mem", model.fc1.bias)
+
+# Layer 2
+save_mem_vertical("W2_vertical.mem", model.fc2.weight)
+save_mem_vertical("b2_vertical.mem", model.fc2.bias)
+
+# Output Layer
+save_mem_vertical("W3_vertical.mem", model.fc3.weight)
+save_mem_vertical("b3_vertical.mem", model.fc3.bias)
+
+print("All .mem files saved!")
