@@ -172,3 +172,292 @@ module neural_network #(parameter
     end
 endmodule
 
+
+
+
+`timescale 1ns / 1ps
+`include "C:/Users/pc/Desktop/xilinx krishna/1 Vivado/neural_network10/neural_network10.srcs/sources_1/new/include.svh"
+
+module dense_layer #(
+    parameter int NUM_INPUTS = 784,
+    parameter int NUM_NEURONS = 16,
+    parameter activation_type ACTIVATION = RELU
+)(
+    input  logic clock,
+    input  logic reset,
+    input  logic inputs_ready,
+    input  fixed_point inputs[NUM_INPUTS],
+    input  fixed_point weights[NUM_NEURONS][NUM_INPUTS],
+    input  fixed_point biases[NUM_NEURONS],
+    output fixed_point outputs[NUM_NEURONS],
+    output logic outputs_ready
+);
+
+    // Your change was correct: A packed vector is needed for the reduction operator.
+    wire [NUM_NEURONS-1:0] neuron_ready_signals;
+
+    // Generate all neuron instances in parallel.
+    genvar i;
+    generate
+        for (i = 0; i < NUM_NEURONS; i = i + 1) begin : neuron_instance_block
+            neuron #(
+                .NUM_INPUTS(NUM_INPUTS)
+                
+            ) inst_neuron (
+                .clock(clock),
+                .reset(reset),
+                .input_ready(inputs_ready),
+                .inputs(inputs),
+                .weights(weights[i]),
+                .bias(biases[i]),
+                .output_value(outputs[i]),
+                .output_ready(neuron_ready_signals[i])
+            );
+        end
+    endgenerate
+
+    // ## MODIFICATION: Registered output for robustness ##
+    // This prevents glitches and ensures outputs_ready is a clean, single-cycle pulse
+    // that is synchronous with the clock.
+    always_ff @(posedge clock or posedge reset) begin
+        if (reset) begin
+            outputs_ready <= 1'b0;
+        end else begin
+            // 'outputs_ready' will be high for one clock cycle when all neurons are ready.
+            outputs_ready <= &neuron_ready_signals;
+        end
+    end
+
+endmodule
+
+
+// neuron_stream.sv
+`timescale 1ns/1ps
+`include "C:/Users/pc/Desktop/xilinx krishna/1 Vivado/neural_network10/neural_network10.srcs/sources_1/new/include.svh"
+
+module neuron #(
+    parameter int NUM_INPUTS = 784,
+    parameter activation_type ACTIVATION = RELU,
+    localparam int FIXED_POINT_WIDTH = 16,
+    localparam int FRACTIONAL_BITS = 8
+)(
+    input  logic clock,
+    input  logic reset,
+    
+    input  logic input_ready,
+    input  fixed_point inputs[NUM_INPUTS],
+    input  fixed_point weights[NUM_INPUTS],
+    input  fixed_point bias,
+    
+    output logic output_ready,
+    output fixed_point output_value
+);
+
+    // FSM States
+    enum { S_IDLE, S_COMPUTE, S_DONE } present_state, next_state;
+
+    // Internal registers
+    reg [$clog2(NUM_INPUTS):0] input_counter;
+    reg signed [2*FIXED_POINT_WIDTH-1:0] accumulator_reg;
+    reg signed [FIXED_POINT_WIDTH-1:0]   output_reg;
+
+    // Wires for multiplication
+    logic signed [FIXED_POINT_WIDTH-1:0] current_input;
+    logic signed [FIXED_POINT_WIDTH-1:0] current_weight;
+    logic signed [2*FIXED_POINT_WIDTH-1:0] mul_result;
+
+    assign current_input  = inputs[input_counter];
+    assign current_weight = weights[input_counter];
+    assign mul_result = current_input * current_weight;
+
+    // Activation function
+    function fixed_point apply_activation(input fixed_point val, input activation_type act);
+        if (act == RELU && val[FIXED_POINT_WIDTH-1]) return 0;
+        else return val;
+    endfunction
+
+    // Sequential Logic (FSM and Registers)
+    always_ff @(posedge clock or posedge reset) begin
+        if (reset) begin
+            present_state   <= S_IDLE;
+            input_counter   <= 0;
+            accumulator_reg <= 0;
+            output_reg      <= 0;
+        end else begin
+            present_state <= next_state;
+            
+            case(present_state)
+                S_IDLE: begin
+                    if(input_ready) begin
+                        accumulator_reg <= 0;
+                        input_counter   <= 0;
+                    end
+                end
+                S_COMPUTE: begin
+                    // ## FIX 1: Guard the MAC to prevent out-of-bounds access ##
+                    // This ensures we only multiply when the counter is in a valid range.
+                    if (input_counter < NUM_INPUTS) begin
+                        accumulator_reg <= accumulator_reg + mul_result;
+                    end
+                    input_counter <= input_counter + 1;
+                end
+                S_DONE: begin
+                    logic signed [2*FIXED_POINT_WIDTH-1:0] biased_acc;
+                    biased_acc = accumulator_reg + (signed'(bias) <<< FRACTIONAL_BITS);
+                    output_reg <= apply_activation(biased_acc >>> FRACTIONAL_BITS, ACTIVATION);
+                end
+            endcase
+        end
+    end
+    
+    // Combinational Logic (Next State Logic)
+    always_comb begin
+        next_state = present_state;
+        case(present_state)
+            S_IDLE: begin
+                if (input_ready) next_state = S_COMPUTE;
+            end
+            S_COMPUTE: begin
+                // ## FIX 2: Transition AFTER the last input is processed ##
+                // We now wait for the counter to reach NUM_INPUTS before moving on.
+                if (input_counter == NUM_INPUTS) begin
+                    next_state = S_DONE;
+                end
+            end
+            S_DONE: begin
+                // Go back to idle when the input is no longer ready
+                if (!input_ready) next_state = S_IDLE;
+            end
+        endcase
+    end
+
+    // Assign final outputs
+    assign output_value = output_reg;
+    assign output_ready = (present_state == S_DONE);
+
+endmodule
+
+
+`timescale 1ns / 1ps
+`include "C:\Users\pc\Desktop\xilinx krishna\1 Vivado\neural_network8\neural_network8.srcs\sources_1\new\include.svh"
+
+module regnet #(
+    // Parameters
+    parameter int INPUT_SIZE = 784,
+    parameter int NUM_LAYERS = 4,
+    parameter layer_builder LAYERS[NUM_LAYERS] = '{
+        '{INPUT,784,NONE},
+        '{DENSE,16,RELU},
+        '{DENSE,16,RELU},
+        '{DENSE,10,SOFTMAX}
+    }
+) (
+    // --- I/O Ports ---
+    input  logic clk,
+    input  logic reset,
+    input  logic image_ready,
+    input  fixed_point pixels[INPUT_SIZE],
+    
+    // ## FIX: Added ports for weights and biases from the testbench ##
+    input  fixed_point weights1[16][784],
+    input  fixed_point bias1[16],
+    input  fixed_point weights2[16][16],
+    input  fixed_point bias2[16],
+    input  fixed_point weights3[10][16],
+    input  fixed_point bias3[10],
+
+    output logic [3:0] label,
+    output logic label_ready
+);
+
+    // --- Internal Signals to Connect Layers ---
+    // These wires will carry the data and control signals between the dense layers.
+    logic layer1_ready;
+    fixed_point layer1_outputs[LAYERS[1].SIZE];
+
+    logic layer2_ready;
+    fixed_point layer2_outputs[LAYERS[2].SIZE];
+    
+    logic layer3_ready;
+    fixed_point layer3_outputs[LAYERS[3].SIZE];
+
+
+    // --- Layer Instantiations ---
+    // Layer 1: 784 inputs -> 16 outputs
+    dense_layer #(
+        .NUM_INPUTS(LAYERS[0].SIZE),
+        .NUM_NEURONS(LAYERS[1].SIZE),
+        .ACTIVATION(LAYERS[1].ACTIVATION)
+    ) inst_layer1 (
+        .clock(clk),
+        .reset(reset),
+        .inputs_ready(image_ready), // Starts with the top-level ready signal
+        .inputs(pixels),
+        .weights(weights1),         // Use weights from input port
+        .biases(bias1),
+        .outputs(layer1_outputs),
+        .outputs_ready(layer1_ready)
+    );
+
+    // Layer 2: 16 inputs -> 16 outputs
+    dense_layer #(
+        .NUM_INPUTS(LAYERS[1].SIZE),
+        .NUM_NEURONS(LAYERS[2].SIZE),
+        .ACTIVATION(LAYERS[2].ACTIVATION)
+    ) inst_layer2 (
+        .clock(clk),
+        .reset(reset),
+        .inputs_ready(layer1_ready), // Starts when layer 1 is done
+        .inputs(layer1_outputs),
+        .weights(weights2),          // Use weights from input port
+        .biases(bias2),
+        .outputs(layer2_outputs),
+        .outputs_ready(layer2_ready)
+    );
+
+    // Layer 3: 16 inputs -> 10 outputs
+    dense_layer #(
+        .NUM_INPUTS(LAYERS[2].SIZE),
+        .NUM_NEURONS(LAYERS[3].SIZE),
+        .ACTIVATION(NONE) // Final layer has no activation before argmax
+    ) inst_layer3 (
+        .clock(clk),
+        .reset(reset),
+        .inputs_ready(layer2_ready), // Starts when layer 2 is done
+        .inputs(layer2_outputs),
+        .weights(weights3),          // Use weights from input port
+        .biases(bias3),
+        .outputs(layer3_outputs),
+        .outputs_ready(layer3_ready)
+    );
+
+
+    // --- Final Output Logic (Argmax) ---
+    // This block finds the index of the neuron with the highest value.
+    always_comb begin
+        // Use standard signed logic for comparison to be explicit
+        logic signed [15:0] max_val_signed;
+        logic [3:0] max_idx;
+
+        // Initialize with the value of the first neuron
+        max_val_signed = signed'(layer3_outputs[0]);
+        max_idx = 0;
+
+        // Loop through the rest of the neurons to find the max
+        for (int i = 1; i < LAYERS[3].SIZE; i++) begin
+            // Explicitly cast the struct to a signed vector for comparison
+            if (signed'(layer3_outputs[i]) > max_val_signed) begin
+                max_val_signed = signed'(layer3_outputs[i]);
+                max_idx = i;
+            end
+        end
+        label = max_idx;
+    end
+
+
+    // The final label is ready when the last layer is done computing.
+    assign label_ready = layer3_ready;
+
+endmodule
+
+
